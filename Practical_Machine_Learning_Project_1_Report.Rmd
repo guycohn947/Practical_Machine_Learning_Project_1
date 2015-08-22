@@ -1,0 +1,232 @@
+---
+title: John Hopkins University -- Data Science Specialization -- Practical Machine
+  Learning Course -- Project 1
+author: "Dr. Guy Cohen"
+date: "August 21, 2015"
+output: html_document
+---
+
+# Human Activity Recognition - Weight Lifting Data
+
+## Problem
+
+### Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+### Data 
+
+The training data for this project are available here: 
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: 
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+### What you should submit
+
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases. 
+
+1. Your submission should consist of a link to a Github repo with your R markdown and compiled HTML file describing your analysis. Please constrain the text of the writeup to < 2000 words and the number of figures to be less than 5. It will make it easier for the graders if you submit a repo with a gh-pages branch so the HTML page can be viewed online (and you always want to make it easy on graders :-).
+2. You should also apply your machine learning algorithm to the 20 test cases available in the test data above. Please submit your predictions in appropriate format to the programming assignment for automated grading. See the programming assignment for additional details. 
+
+### Reproducibility 
+
+Due to security concerns with the exchange of R code, your code will not be run during the evaluation by your classmates. Please be sure that if they download the repo, they will be able to view the compiled HTML version of your analysis. 
+
+## Solution
+
+__I verified the length of the text (not including code and code output) to be less than 2,000 words. The number of figures is less than 5.__
+
+### Getting and Cleaning the Data
+
+```{r}
+set.seed(33833)
+data1 <- read.table("pml-training.csv", header = TRUE, sep=",", 
+                    stringsAsFactors = FALSE, na.strings = c("","NA"))
+```
+
+Remove serial number, time stamps and window information features. Remove features which have more than 50% missing values.
+```{r}
+data1 <- data1[, -c(1,3,4,5,6,7)]
+incompleteFeatures <- which((sapply(data1, function(x) {
+    sum(is.na(x))}) / dim(data1)[1]) > 0.5)
+data1 <- data1[, -incompleteFeatures]
+print(paste("Percent of complete cases is now: ",
+            sum(complete.cases(data1)) / dim(data1)[1] * 100,"%", sep = ""))
+print(paste("Number of features is now: ",dim(data1)[2], sep = ""))
+```
+
+Convert "user_name" and "classe" features to factor variables.
+```{r}
+data1[,c("user_name","classe")] <-
+    as.data.frame(lapply(data1[,c("user_name","classe")], factor))
+```
+
+### Exploratory Data Analysis
+
+We examine the structure and the summary of the features.
+```{r}
+str(data1)
+summary(data1)
+```
+
+Since we will not use regression, highly-correlated feature pairs are not a problem. We assume any outliers are true measurements, since we don't have the means to check if they are indeed so. For the two categorical features: `user_name` and `classe`, we see from the output of `summary(data1)` above that there is no problem with imbalance. We will deal with skewed variables by applying the `BoxCox` preprocessing option from the `caret` package when using linear models.
+
+We plot the outcome variable in the plane of the first two principal components.
+```{r}
+library(stats)
+pr.out = prcomp(data1[,2:53], scale=TRUE)
+plot(pr.out$x[,1],pr.out$x[,2],col=data1$classe,xlab = "First Principal Component", ylab="Second Principal Component", main = "Principal Components Plot")
+```
+
+We see from the plot that the classes are not easily separable and that principal component analysis is probably of little use here.
+
+### Feature Preprocessing/Selection/Extraction
+
+There are no missing data as we saw above. 
+
+We now scale the data to have mean 0 and SD 1.
+```{r}
+data1[, 2:53] <- as.data.frame(lapply(data1[, 2:53],scale))
+```
+
+We also create a second dataset which includes only the variables seen by single-factor ANOVA to have an association with the outcome variable.
+```{r}
+relatedVariables <- which(sapply(names(data1[, 2:53]),
+                                 function (x) { anova(lm(
+                                     as.formula(paste(x, " ~ classe")),
+                                     data = data1))[["Pr(>F)"]][1]}) < 0.05) + 1
+data2 <- data1[, c(1, relatedVariables, 54)]
+```
+
+### Statistical prediction/modeling
+
+The predictive models we will consider are : LDA, random forests and SVM. 
+
+We create a trainset and a model stacking validation set.
+```{r, results="hide"}
+library(caret)
+inTrain <- createDataPartition(y=data1$classe, p=0.7, list=FALSE)
+training1 <- data1[inTrain, ]; testing1 <- data1[-inTrain, ]
+training2 <- data2[inTrain, ]; testing2 <- data2[-inTrain, ]
+```
+
+We create 10 folds for k-fold cross-validation.
+```{r}
+kNum <- 10
+folds <- createFolds(training1$classe, k = kNum)
+```
+
+#### Linear Discriminant Analysis
+
+We train the LDA model on the data.
+```{r}
+cv_results <- sapply(folds, function(x) {
+    data_train <- training1[x, ]
+    data_test <- training1[-x, ]
+    data_model <- train(classe ~ . , data = data_train, 
+                         method = "lda", preProcess = "BoxCox")
+    data_pred <- predict(data_model, newdata = data_test)
+    return(mean(data_pred == data_test$classe))
+})
+print(paste("With 10-fold CV, LDA accuracy has mean", round(mean(cv_results), 4),
+            "and SD", round(sd(cv_results), 4),
+            ". This is our estimate for out of sample accuracy."))
+```
+
+Try again only with the relevant features.
+```{r}
+cv_results <- sapply(folds, function(x) {
+    data_train <- training2[x, ]
+    data_test <- training2[-x, ]
+    data_model <- train(classe ~ . , data = data_train, 
+                         method = "lda", preProcess = "BoxCox")
+    data_pred <- predict(data_model, newdata = data_test)
+    return(mean(data_pred == data_test$classe))
+})
+print(paste("With 10-fold CV, LDA accuracy has mean", round(mean(cv_results), 4),
+            "and SD", round(sd(cv_results), 4),
+            ". This is our estimate for out of sample accuracy."))
+```
+
+#### Random Forests
+
+We train the random forests model on the data.
+```{r, results="hide"}
+library(randomForest)
+cv_results <- sapply(folds, function(x) {
+    data_train <- training1[x, ]
+    data_test <- training1[-x, ]
+    data_model <- randomForest(classe ~ ., data = data_train, ntree = 500)
+    data_pred <- predict(data_model, newdata = data_test)
+    return(mean(data_pred == data_test$classe))
+})
+```
+```{r}
+print(paste("With 10-fold CV, random forest accuracy has mean",
+            round(mean(cv_results), 4),
+            "and SD", round(sd(cv_results), 4),
+            ". This is our estimate for out of sample accuracy."))
+```
+
+Try again only with the relevant features.
+```{r, results="hide"}
+cv_results <- sapply(folds, function(x) {
+    data_train <- training2[x, ]
+    data_test <- training2[-x, ]
+    data_model <- randomForest(classe ~ ., data = data_train, ntree = 500)
+    data_pred <- predict(data_model, newdata = data_test)
+    return(mean(data_pred == data_test$classe))
+})
+```
+```{r}
+print(paste("With 10-fold CV, random forest accuracy has mean",
+            round(mean(cv_results), 4),
+            "and SD", round(sd(cv_results), 4),
+            ". This is our estimate for out of sample accuracy."))
+```
+
+### Support Vector Machines
+
+We train the support vector machine model on the data.
+```{r, results="hide"}
+library(e1071)
+cv_results <- sapply(folds, function(x) {
+    data_train <- training1[x, ]
+    data_test <- training1[-x, ]
+    data_model <- svm(classe ~ . , data = data_train, cost = 20)
+    data_pred <- predict(data_model, newdata = data_test)
+    return(mean(data_pred == data_test$classe))
+})
+```
+```{r}
+print(paste("With 10-fold CV, SVM accuracy has mean",
+            round(mean(cv_results), 4),
+            "and SD", round(sd(cv_results), 4),
+            ". This is our estimate for out of sample accuracy."))
+```
+
+Try again only with the relevant features.
+```{r, results="hide"}
+cv_results <- sapply(folds, function(x) {
+    data_train <- training2[x, ]
+    data_test <- training2[-x, ]
+    data_model <- svm(classe ~ . , data = data_train, cost = 20)
+    data_pred <- predict(data_model, newdata = data_test)
+    return(mean(data_pred == data_test$classe))
+})
+```
+```{r}
+print(paste("With 10-fold CV, SVM accuracy has mean",
+            round(mean(cv_results), 4),
+            "and SD", round(sd(cv_results), 4),
+            ". This is our estimate for out of sample accuracy."))
+```
+
+### Conclusions
+
+We see that removing irrelevant variables did not improve prediction performance. This is evidence for the ability of the models used to pick up the relevant features. We also see that model performance did not deteriorate upon removing the irrelevant variables. This is evidence for these variables being indeed irrelevant. The best model is random forests, which keeps all the variables. Based on 10-fold cross-validation, __we estimate the out of sample error of this model as 7%__. Per the instructions, we do not show here the prediction results for the 20 observations in the test set.
